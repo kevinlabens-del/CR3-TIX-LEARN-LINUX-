@@ -1,0 +1,14 @@
+{
+  "name": "CR3@TIX Learn Linux",
+  "short_name": "Learn Linux",
+  "description": "Parcours interactif Linux du niveau débutant au niveau professionnel.",
+  "lang": "fr",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#060913",
+  "theme_color": "#060913",
+  "categories": ["education", "developer tools", "productivity"],
+  "icons": [{ "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

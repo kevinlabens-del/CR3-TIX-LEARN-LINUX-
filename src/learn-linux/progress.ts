@@ -1,6 +1,9 @@
-import { ALL_LESSONS, ALL_MODULES, COURSE_LEVELS, totalCourseXp } from "./content";
+import { ALL_LESSONS, ALL_MODULES, COURSE_LEVELS, totalCourseXp } from "./content.ts";
+import { LABS, totalLabXp } from "./v2/labs.ts";
+import { ALL_PRACTICES, practiceId, reinforcementXp } from "./v2/practice.ts";
 
-export const PROGRESS_STORAGE_KEY = "creatix-learn-linux:progress:v1";
+export const PROGRESS_STORAGE_KEY = "creatix-learn-linux:progress:v2";
+export const LEGACY_PROGRESS_STORAGE_KEY = "creatix-learn-linux:progress:v1";
 export const THEME_STORAGE_KEY = "creatix-learn-linux:theme";
 
 export interface CommandHistoryItem {
@@ -11,7 +14,7 @@ export interface CommandHistoryItem {
 }
 
 export interface LearnerProgress {
-  version: 1;
+  version: 2;
   displayName: string;
   onboardingComplete: boolean;
   xp: number;
@@ -26,6 +29,23 @@ export interface LearnerProgress {
   totalSeconds: number;
   achievements: string[];
   currentLessonId: string;
+  completedPractices: string[];
+  performanceByLesson: Record<string, LessonPerformance>;
+  completedLabs: string[];
+  labScores: Record<string, number>;
+  passedPracticalExams: number[];
+  dailyGoalMinutes: number;
+}
+
+export interface LessonPerformance {
+  attempts: number;
+  successes: number;
+  hintsUsed: number;
+  totalSeconds: number;
+  reviewStage: number;
+  nextReviewAt: string;
+  lastAttemptAt: string;
+  errors: Record<string, number>;
 }
 
 export interface AchievementDefinition {
@@ -44,6 +64,9 @@ export const ACHIEVEMENTS: AchievementDefinition[] = [
   { id: "admin", icon: "#", title: "Administrateur", description: "Valider le niveau avancé." },
   { id: "streak-3", icon: "3", title: "Série lancée", description: "Apprendre pendant 3 jours consécutifs." },
   { id: "graduate", icon: "★", title: "Linux Pro", description: "Terminer tout le parcours." },
+  { id: "first-lab", icon: "L", title: "Sur le terrain", description: "Résoudre un premier laboratoire." },
+  { id: "ten-practices", icon: "R", title: "Mémoire solide", description: "Valider 10 entraînements de renforcement." },
+  { id: "all-labs", icon: "15", title: "Prêt pour l'astreinte", description: "Résoudre les 15 laboratoires." },
 ];
 
 export const RANKS = [
@@ -53,11 +76,15 @@ export const RANKS = [
   { min: 1200, name: "Utilisateur confirmé", short: "N4" },
   { min: 2000, name: "Administrateur Linux", short: "N5" },
   { min: 3000, name: "Expert CR3@TIX", short: "PRO" },
+  { min: 4500, name: "Ingénieur Linux", short: "ENG" },
+  { min: 6000, name: "Architecte systèmes", short: "ARCH" },
 ];
+
+export const totalV2Xp = totalCourseXp + reinforcementXp + totalLabXp;
 
 export function defaultProgress(): LearnerProgress {
   return {
-    version: 1,
+    version: 2,
     displayName: "",
     onboardingComplete: false,
     xp: 0,
@@ -72,6 +99,12 @@ export function defaultProgress(): LearnerProgress {
     totalSeconds: 0,
     achievements: [],
     currentLessonId: ALL_LESSONS[0]?.id ?? "",
+    completedPractices: [],
+    performanceByLesson: {},
+    completedLabs: [],
+    labScores: {},
+    passedPracticalExams: [],
+    dailyGoalMinutes: 10,
   };
 }
 
@@ -85,15 +118,36 @@ export function sanitizeProgress(value: unknown): LearnerProgress {
   const source = value as Partial<LearnerProgress>;
   const validLessonIds = new Set(ALL_LESSONS.map((item) => item.id));
   const validCommandNames = new Set(ALL_LESSONS.flatMap((item) => item.command ? [item.command] : []));
+  const validPracticeIds = new Set(ALL_PRACTICES.map((item) => item.id));
+  const validLabIds = new Set(LABS.map((item) => item.id));
+  const completedLessons = isStringArray(source.completedLessons)
+    ? [...new Set(source.completedLessons.filter((id) => validLessonIds.has(id)))]
+    : [];
+  const migratedGuidedPractices = completedLessons.map((id) => practiceId(id, "guided"));
+
+  const rawPerformance = source.performanceByLesson && typeof source.performanceByLesson === "object"
+    ? source.performanceByLesson as Record<string, Partial<LessonPerformance>>
+    : {};
+  const performanceByLesson = Object.fromEntries(Object.entries(rawPerformance)
+    .filter(([lessonId]) => validLessonIds.has(lessonId))
+    .map(([lessonId, item]) => [lessonId, {
+      attempts: Math.max(0, Math.round(Number(item.attempts) || 0)),
+      successes: Math.max(0, Math.round(Number(item.successes) || 0)),
+      hintsUsed: Math.max(0, Math.round(Number(item.hintsUsed) || 0)),
+      totalSeconds: Math.max(0, Math.round(Number(item.totalSeconds) || 0)),
+      reviewStage: Math.max(0, Math.min(6, Math.round(Number(item.reviewStage) || 0))),
+      nextReviewAt: typeof item.nextReviewAt === "string" ? item.nextReviewAt : new Date(0).toISOString(),
+      lastAttemptAt: typeof item.lastAttemptAt === "string" ? item.lastAttemptAt : "",
+      errors: item.errors && typeof item.errors === "object" ? item.errors : {},
+    } satisfies LessonPerformance]));
 
   return {
     ...base,
+    version: 2,
     displayName: typeof source.displayName === "string" ? source.displayName.slice(0, 40) : "",
     onboardingComplete: Boolean(source.onboardingComplete),
     xp: typeof source.xp === "number" && Number.isFinite(source.xp) ? Math.max(0, Math.round(source.xp)) : 0,
-    completedLessons: isStringArray(source.completedLessons)
-      ? [...new Set(source.completedLessons.filter((id) => validLessonIds.has(id)))]
-      : [],
+    completedLessons,
     passedExams: Array.isArray(source.passedExams)
       ? [...new Set(source.passedExams.filter((id): id is number => typeof id === "number" && id >= 1 && id <= COURSE_LEVELS.length))]
       : [],
@@ -114,13 +168,30 @@ export function sanitizeProgress(value: unknown): LearnerProgress {
     currentLessonId: typeof source.currentLessonId === "string" && validLessonIds.has(source.currentLessonId)
       ? source.currentLessonId
       : base.currentLessonId,
+    completedPractices: [...new Set([
+      ...migratedGuidedPractices,
+      ...(isStringArray(source.completedPractices) ? source.completedPractices.filter((id) => validPracticeIds.has(id)) : []),
+    ])],
+    performanceByLesson,
+    completedLabs: isStringArray(source.completedLabs)
+      ? [...new Set(source.completedLabs.filter((id) => validLabIds.has(id)))]
+      : [],
+    labScores: source.labScores && typeof source.labScores === "object"
+      ? Object.fromEntries(Object.entries(source.labScores).filter(([id, score]) => validLabIds.has(id) && typeof score === "number").map(([id, score]) => [id, Math.max(0, Math.min(100, Math.round(score as number)))]))
+      : {},
+    passedPracticalExams: Array.isArray(source.passedPracticalExams)
+      ? [...new Set(source.passedPracticalExams.filter((id): id is number => typeof id === "number" && id >= 1 && id <= COURSE_LEVELS.length))]
+      : [],
+    dailyGoalMinutes: typeof source.dailyGoalMinutes === "number" && Number.isFinite(source.dailyGoalMinutes)
+      ? Math.max(5, Math.min(60, Math.round(source.dailyGoalMinutes)))
+      : 10,
   };
 }
 
 export function loadProgress(): LearnerProgress {
   if (typeof window === "undefined") return defaultProgress();
   try {
-    const raw = window.localStorage.getItem(PROGRESS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(PROGRESS_STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_PROGRESS_STORAGE_KEY);
     return raw ? sanitizeProgress(JSON.parse(raw)) : defaultProgress();
   } catch {
     return defaultProgress();
@@ -166,13 +237,16 @@ export function nextRankForXp(xp: number) {
 }
 
 export function coursePercent(progress: LearnerProgress): number {
-  const lessonPart = progress.completedLessons.length;
-  const examPart = progress.passedExams.length;
-  return Math.min(100, Math.round(((lessonPart + examPart) / (ALL_LESSONS.length + COURSE_LEVELS.length)) * 100));
+  const reinforced = progress.completedPractices.filter((id) => !id.endsWith(":guided")).length;
+  const lessonPart = progress.completedLessons.length / ALL_LESSONS.length;
+  const examPart = progress.passedExams.length / COURSE_LEVELS.length;
+  const labPart = progress.completedLabs.length / LABS.length;
+  const practicePart = reinforced / (ALL_LESSONS.length * 2);
+  return Math.min(100, Math.round((lessonPart * 0.55 + examPart * 0.15 + labPart * 0.2 + practicePart * 0.1) * 100));
 }
 
 export function xpPercent(progress: LearnerProgress): number {
-  return Math.min(100, Math.round((progress.xp / totalCourseXp) * 100));
+  return Math.min(100, Math.round((progress.xp / totalV2Xp) * 100));
 }
 
 export function isModuleComplete(moduleId: string, progress: LearnerProgress): boolean {
@@ -215,7 +289,7 @@ export function masteryForSkill(progress: LearnerProgress, skill: string): numbe
 }
 
 export function refreshAchievements(progress: LearnerProgress): LearnerProgress {
-  const unlocked = new Set(progress.achievements);
+  const unlocked = new Set(progress.achievements.filter((id) => id !== "graduate"));
   const streak = currentStreak(progress.activeDays);
   if (progress.commandHistory.length >= 1) unlocked.add("first-command");
   if (progress.completedLessons.length >= 1) unlocked.add("first-lesson");
@@ -224,7 +298,15 @@ export function refreshAchievements(progress: LearnerProgress): LearnerProgress 
   if (progress.completedLessons.some((id) => id.includes("pipe"))) unlocked.add("pipe-master");
   if (progress.passedExams.includes(4)) unlocked.add("admin");
   if (streak >= 3) unlocked.add("streak-3");
-  if (progress.completedLessons.length === ALL_LESSONS.length && progress.passedExams.length === COURSE_LEVELS.length) unlocked.add("graduate");
+  if (progress.completedLabs.length >= 1) unlocked.add("first-lab");
+  if (progress.completedPractices.filter((id) => !id.endsWith(":guided")).length >= 10) unlocked.add("ten-practices");
+  if (progress.completedLabs.length === LABS.length) unlocked.add("all-labs");
+  if (
+    progress.completedLessons.length === ALL_LESSONS.length
+    && progress.passedExams.length === COURSE_LEVELS.length
+    && progress.passedPracticalExams.length === COURSE_LEVELS.length
+    && progress.completedLabs.length === LABS.length
+  ) unlocked.add("graduate");
   return { ...progress, achievements: [...unlocked] };
 }
 

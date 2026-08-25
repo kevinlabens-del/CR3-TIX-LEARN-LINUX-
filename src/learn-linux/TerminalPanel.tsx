@@ -6,6 +6,7 @@ import {
   type SimState,
   WELCOME_LINES,
 } from "./sim-shell";
+import { completeShellInput } from "./shell/completion";
 
 interface TerminalLine {
   id: number;
@@ -34,6 +35,8 @@ export function TerminalPanel({
 }: TerminalPanelProps) {
   const [input, setInput] = useState("");
   const [historyCursor, setHistoryCursor] = useState(-1);
+  const [undoStack, setUndoStack] = useState<SimState[]>([]);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [lines, setLines] = useState<TerminalLine[]>(() =>
     WELCOME_LINES.map((output, index) => ({ id: index, output, error: false })),
   );
@@ -50,6 +53,7 @@ export function TerminalPanel({
     if (!command) return;
     const prompt = formatPrompt(state);
     const result = executeCommandLine(state, command);
+    setUndoStack((current) => [...current, state].slice(-20));
     if (result.clear) {
       setLines([]);
     } else {
@@ -68,6 +72,32 @@ export function TerminalPanel({
     onExecute?.(command, result);
     setInput("");
     setHistoryCursor(-1);
+  };
+
+  const appendSystemLine = (output: string) => {
+    setLines((current) => [...current, { id: lineId.current++, output }].slice(-120));
+  };
+
+  const completeInput = () => {
+    const completion = completeShellInput(state, input);
+    setInput(completion.input);
+    if (completion.suggestions.length > 1 && !completion.completed) {
+      appendSystemLine(completion.suggestions.join("  "));
+    }
+  };
+
+  const cancelInput = () => {
+    if (input) appendSystemLine(`^C  ${input}`);
+    setInput("");
+    setHistoryCursor(-1);
+  };
+
+  const undoLastCommand = () => {
+    const previous = undoStack.at(-1);
+    if (!previous) return;
+    onStateChange(previous);
+    setUndoStack((current) => current.slice(0, -1));
+    appendSystemLine("↶ État du laboratoire restauré avant la dernière commande.");
   };
 
   const navigateHistory = (direction: -1 | 1) => {
@@ -154,6 +184,19 @@ export function TerminalPanel({
                 event.preventDefault();
                 navigateHistory(1);
               }
+              if (event.key === "Tab") {
+                event.preventDefault();
+                completeInput();
+              }
+              if (event.key === "c" && event.ctrlKey) {
+                event.preventDefault();
+                cancelInput();
+              }
+              if (event.key === "r" && event.ctrlKey) {
+                event.preventDefault();
+                const found = [...state.history].reverse().find((command) => command.includes(input));
+                if (found) setInput(found);
+              }
               if (event.key === "l" && event.ctrlKey) {
                 event.preventDefault();
                 setLines([]);
@@ -166,27 +209,42 @@ export function TerminalPanel({
         <div ref={terminalEnd} />
       </div>
 
+      {inspectorOpen && (
+        <div className="terminal-inspector" aria-label="Arborescence du dossier courant">
+          <strong>Arborescence · {state.cwd}</strong>
+          <div>
+            {Object.entries(state.fs)
+              .filter(([path]) => path.startsWith(state.cwd === "/" ? "/" : `${state.cwd}/`) && path !== state.cwd)
+              .filter(([path]) => !path.slice((state.cwd === "/" ? "/" : `${state.cwd}/`).length).includes("/"))
+              .map(([path, node]) => <span key={path}>{node.type === "dir" ? "▸" : "·"} {path.slice(path.lastIndexOf("/") + 1)}{node.type === "dir" ? "/" : ""}</span>)}
+          </div>
+        </div>
+      )}
+
       <footer className="terminal-toolbar" aria-label="Raccourcis du terminal">
         <div className="terminal-keys">
           {[
-            ["Tab", "  "],
-            ["Ctrl", ""],
+            ["Tab", "autocomplete"],
+            ["^C", "cancel"],
             ["/", "/"],
             ["~", "~"],
             ["|", " | "],
+            ["&&", " && "],
             ["-", "-"],
             ["↑", "history-up"],
           ].map(([label, value]) => (
             <button
               key={label}
               type="button"
-              onClick={() => value === "history-up" ? navigateHistory(-1) : value && insertKey(value)}
+              onClick={() => value === "history-up" ? navigateHistory(-1) : value === "autocomplete" ? completeInput() : value === "cancel" ? cancelInput() : value && insertKey(value)}
             >
               {label}
             </button>
           ))}
         </div>
         <div className="quick-commands" aria-label="Commandes rapides">
+          <button type="button" disabled={!undoStack.length} onClick={undoLastCommand}>↶ Annuler</button>
+          <button type="button" onClick={() => setInspectorOpen((value) => !value)}>{inspectorOpen ? "Fermer arbre" : "Arbre"}</button>
           {quickCommands.map((command) => (
             <button type="button" key={command} onClick={() => run(command)}>{command}</button>
           ))}

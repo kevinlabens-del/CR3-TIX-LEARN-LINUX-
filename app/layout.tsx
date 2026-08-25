@@ -5,25 +5,25 @@ const publicUrl = "https://kevinlabens-del.github.io/CR3-TIX-LEARN-LINUX-/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(publicUrl),
-  title: "CR3@TIX Learn Linux — De zéro au niveau pro",
-  description: "Apprends Linux dans un terminal interactif sécurisé : 5 niveaux, 27 modules, exercices, examens, XP et laboratoires professionnels.",
+  title: "CR3@TIX Learn Linux V2 — De zéro au niveau pro",
+  description: "Apprends Linux sans compte : 162 entraînements adaptatifs, SimShell 2.0 sécurisé, examens pratiques et 15 laboratoires professionnels.",
   applicationName: "CR3@TIX Learn Linux",
   authors: [{ name: "CR3@TIX" }],
   manifest: "/manifest.webmanifest",
-  icons: { icon: "/favicon.svg", shortcut: "/favicon.svg", apple: "/favicon.svg" },
+  icons: { icon: "/favicon.svg", shortcut: "/favicon.svg", apple: "/apple-touch-icon.png" },
   openGraph: {
     type: "website",
     locale: "fr_FR",
     url: publicUrl,
     siteName: "CR3@TIX Learn Linux",
-    title: "Apprends Linux. Commande après commande.",
-    description: "Un parcours interactif complet, du premier ls à l'administration système.",
+    title: "CR3@TIX Learn Linux V2 — Apprends en pratiquant",
+    description: "Sans compte : parcours adaptatif, terminal isolé et 15 missions professionnelles.",
     images: [{ url: "/og.png", width: 1200, height: 630, alt: "CR3@TIX Learn Linux" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "CR3@TIX Learn Linux",
-    description: "De zéro au niveau pro, commande après commande.",
+    title: "CR3@TIX Learn Linux V2",
+    description: "De zéro au niveau pro, sans compte et commande après commande.",
     images: ["/og.png"],
   },
 };

@@ -1,4 +1,5 @@
 import type { Check } from "./types";
+import { splitControlClauses, tokenizeShell } from "./shell/syntax.ts";
 
 export interface FileNode {
   type: "file" | "dir";
@@ -25,6 +26,7 @@ export interface SimState {
   containers: Record<string, ContainerStatus>;
   aptUpdated: boolean;
   commandCount: number;
+  functions: Record<string, string>;
 }
 
 export interface ExecutionResult {
@@ -41,6 +43,15 @@ interface CommandResult {
   exitCode?: number;
   clear?: boolean;
 }
+
+export const SHELL_COMMANDS = [
+  "apt", "apt-get", "bash", "cat", "cd", "chmod", "clear", "cp", "crontab", "curl",
+  "cut", "date", "df", "dig", "docker", "du", "echo", "env", "export", "file", "find",
+  "git", "grep", "groups", "head", "help", "history", "hostname", "id", "ip", "journalctl",
+  "kill", "less", "ls", "man", "mkdir", "mv", "ping", "ps", "pwd", "rm", "rmdir", "scp",
+  "sha256sum", "sort", "ss", "ssh", "stat", "sudo", "systemctl", "tail", "tar", "touch",
+  "tr", "ufw", "uname", "uniq", "wc", "whoami",
+] as const;
 
 const now = Date.now();
 
@@ -98,6 +109,7 @@ export function createInitialState(): SimState {
     containers: { api: "unhealthy", database: "running" },
     aptUpdated: false,
     commandCount: 0,
+    functions: {},
   };
 }
 
@@ -112,6 +124,7 @@ function cloneState(source: SimState): SimState {
     services: { ...source.services },
     sshHosts: [...source.sshHosts],
     containers: { ...source.containers },
+    functions: { ...source.functions },
   };
 }
 
@@ -159,64 +172,11 @@ function symbolicMode(node: FileNode): string {
   return `${node.type === "dir" ? "d" : "-"}${mode.split("").map(triplet).join("")}`;
 }
 
-function tokenize(input: string): string[] {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  let escaping = false;
-
-  const push = () => {
-    if (current) tokens.push(current);
-    current = "";
-  };
-
-  for (let index = 0; index < input.length; index += 1) {
-    const char = input[index];
-    if (escaping) {
-      current += char;
-      escaping = false;
-      continue;
-    }
-    if (char === "\\" && quote !== "'") {
-      escaping = true;
-      continue;
-    }
-    if (quote) {
-      if (char === quote) quote = null;
-      else current += char;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-    if (/\s/.test(char)) {
-      push();
-      continue;
-    }
-    if (char === ">") {
-      push();
-      if (input[index + 1] === ">") {
-        tokens.push(">>");
-        index += 1;
-      } else tokens.push(">");
-      continue;
-    }
-    if (char === "|" || char === "<") {
-      push();
-      tokens.push(char);
-      continue;
-    }
-    current += char;
-  }
-  push();
-  return tokens;
-}
-
 function expandToken(state: SimState, token: string): string {
-  return token.replace(/\$(\?|[A-Za-z_][A-Za-z0-9_]*)/g, (_, name: string) =>
-    name === "?" ? String(state.lastExitCode) : (state.env[name] ?? ""),
-  );
+  return token.replace(/\$\{([^}]+)\}|\$(\?|[A-Za-z_][A-Za-z0-9_]*)/g, (_, braced: string | undefined, plain: string | undefined) => {
+    const name = braced ?? plain ?? "";
+    return name === "?" ? String(state.lastExitCode) : (state.env[name] ?? "");
+  });
 }
 
 function readInput(state: SimState, args: string[], stdin: string): { content?: string; error?: string } {
@@ -268,6 +228,24 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
+function expandGlobArgument(state: SimState, raw: string): string[] {
+  const value = expandToken(state, raw);
+  if (!/[?*]/.test(value)) return [value];
+  const slash = value.lastIndexOf("/");
+  const directoryPart = slash >= 0 ? value.slice(0, slash) || "/" : ".";
+  const namePattern = slash >= 0 ? value.slice(slash + 1) : value;
+  const directory = resolvePath(state, directoryPart);
+  if (state.fs[directory]?.type !== "dir") return [value];
+  const matcher = globToRegExp(namePattern);
+  const matches = directChildren(state, directory)
+    .map((path) => baseName(path))
+    .filter((name) => (namePattern.startsWith(".") || !name.startsWith(".")) && matcher.test(name));
+  if (!matches.length) return [value];
+  if (slash < 0) return matches;
+  const prefix = value.slice(0, slash);
+  return matches.map((name) => prefix === "/" ? `/${name}` : `${prefix}/${name}`);
+}
+
 function simpleHash(value: string): string {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -279,9 +257,21 @@ function simpleHash(value: string): string {
 }
 
 function runSimpleCommand(state: SimState, command: string, rawArgs: string[], stdin: string): CommandResult {
-  const args = rawArgs.map((arg) => expandToken(state, arg));
+  const args = rawArgs.flatMap((arg) => expandGlobArgument(state, arg));
+
+  const assignment = command.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
+  if (assignment && rawArgs.length === 0) {
+    state.env[assignment[1]] = expandToken(state, assignment[2]);
+    return {};
+  }
+
+  if (state.functions[command]) return executeScriptInState(state, state.functions[command]);
 
   switch (command) {
+    case "true":
+      return {};
+    case "false":
+      return { exitCode: 1 };
     case "pwd":
       return { stdout: `${state.cwd}\n` };
     case "whoami":
@@ -704,14 +694,8 @@ function runSimpleCommand(state: SimState, command: string, rawArgs: string[], s
   }
 }
 
-export function executeCommandLine(current: SimState, input: string): ExecutionResult {
-  const line = input.trim();
-  const state = cloneState(current);
-  if (!line) return { state, stdout: "", stderr: "", exitCode: 0 };
-
-  state.history.push(line);
-  state.commandCount += 1;
-  const tokens = tokenize(line);
+function executePipelineInState(state: SimState, line: string): CommandResult {
+  const tokens = tokenizeShell(line);
   const segments: string[][] = [[]];
   for (const token of tokens) {
     if (token === "|") segments.push([]);
@@ -763,10 +747,111 @@ export function executeCommandLine(current: SimState, input: string): ExecutionR
     if (exitCode !== 0 && segments.length > 1) break;
   }
 
+  return { stdout, stderr, exitCode, clear };
+}
+
+function testCondition(state: SimState, flag: string, operand: string): boolean {
+  const path = resolvePath(state, expandToken(state, operand));
+  const node = state.fs[path];
+  if (flag === "-e") return Boolean(node);
+  if (flag === "-f") return node?.type === "file";
+  if (flag === "-d") return node?.type === "dir";
+  if (flag === "-n") return Boolean(expandToken(state, operand));
+  if (flag === "-z") return !expandToken(state, operand);
+  return false;
+}
+
+function substituteCommands(state: SimState, source: string): { source: string; stderr: string; exitCode: number } {
+  let expanded = source;
+  let stderr = "";
+  let exitCode = 0;
+  for (let pass = 0; pass < 8; pass += 1) {
+    const match = expanded.match(/\$\(([^()]*)\)/);
+    if (!match) break;
+    const isolated = cloneState(state);
+    const result = executeScriptInState(isolated, match[1]);
+    stderr += result.stderr ?? "";
+    exitCode = result.exitCode ?? 0;
+    if (exitCode !== 0) return { source: expanded, stderr, exitCode };
+    expanded = `${expanded.slice(0, match.index)}${(result.stdout ?? "").trim().replace(/\s*\n\s*/g, " ")}${expanded.slice((match.index ?? 0) + match[0].length)}`;
+  }
+  return { source: expanded, stderr, exitCode };
+}
+
+function executeScriptInState(state: SimState, source: string): CommandResult {
+  const line = source.trim();
+  if (!line) return {};
+
+  const functionDefinition = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*([\s\S]*?)\s*;?\s*\}$/);
+  if (functionDefinition) {
+    state.functions[functionDefinition[1]] = functionDefinition[2].replace(/;\s*$/, "").trim();
+    return {};
+  }
+
+  const loop = line.match(/^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([\s\S]+?)\s*;\s*do\s+([\s\S]+?)\s*;\s*done$/);
+  if (loop) {
+    const [, variable, rawValues, body] = loop;
+    const values = tokenizeShell(rawValues).flatMap((value) => expandGlobArgument(state, value));
+    let stdout = "";
+    let stderr = "";
+    let exitCode = 0;
+    for (const value of values) {
+      state.env[variable] = value;
+      const result = executeScriptInState(state, body);
+      stdout += result.stdout ?? "";
+      stderr += result.stderr ?? "";
+      exitCode = result.exitCode ?? 0;
+    }
+    return { stdout, stderr, exitCode };
+  }
+
+  const conditional = line.match(/^if\s+\[\s+(-[efdnz])\s+(.+?)\s*\]\s*;\s*then\s+([\s\S]+?)(?:\s*;\s*else\s+([\s\S]+?))?\s*;\s*fi$/);
+  if (conditional) {
+    const [, flag, operand, successBranch, failureBranch] = conditional;
+    const branch = testCondition(state, flag, operand) ? successBranch : failureBranch;
+    return branch ? executeScriptInState(state, branch) : {};
+  }
+
+  if (/(?:&&|\|\||;)\s*$/.test(line)) {
+    return { stderr: "bash: erreur de syntaxe après l'opérateur de contrôle\n", exitCode: 2 };
+  }
+
+  const substitution = substituteCommands(state, line);
+  if (substitution.exitCode !== 0) return { stderr: substitution.stderr, exitCode: substitution.exitCode };
+  const clauses = splitControlClauses(substitution.source);
+  let stdout = "";
+  let stderr = substitution.stderr;
+  let exitCode = 0;
+  let clear = false;
+
+  for (const clause of clauses) {
+    if (clause.operatorBefore === "&&" && exitCode !== 0) continue;
+    if (clause.operatorBefore === "||" && exitCode === 0) continue;
+    const result = executePipelineInState(state, clause.source);
+    stdout += result.stdout ?? "";
+    stderr += result.stderr ?? "";
+    exitCode = result.exitCode ?? 0;
+    clear ||= Boolean(result.clear);
+    state.lastExitCode = exitCode;
+  }
+  return { stdout, stderr, exitCode, clear };
+}
+
+export function executeCommandLine(current: SimState, input: string): ExecutionResult {
+  const line = input.trim();
+  const state = cloneState(current);
+  if (!line) return { state, stdout: "", stderr: "", exitCode: 0 };
+
+  state.history.push(line);
+  state.commandCount += 1;
+  const result = executeScriptInState(state, line);
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+  const exitCode = result.exitCode ?? 0;
   state.lastExitCode = exitCode;
   state.lastCommand = line;
   state.lastOutput = `${stdout}${stderr}`;
-  return { state, stdout, stderr, exitCode, clear };
+  return { state, stdout, stderr, exitCode, clear: result.clear };
 }
 
 export function evaluateCheck(state: SimState, check: Check): boolean {
@@ -810,7 +895,7 @@ export function formatPrompt(state: SimState): string {
 }
 
 export const WELCOME_LINES = [
-  "CR3@TIX SimShell 1.0 — laboratoire Linux sécurisé",
+  "CR3@TIX SimShell 2.0 — laboratoire Linux sécurisé",
   "Aucune commande ne peut accéder à ton véritable appareil.",
-  "Tape help pour obtenir de l'aide ou commence l'exercice affiché.",
+  "Tab complète · ↑ rappelle · Ctrl+C annule · Ctrl+L efface.",
 ];

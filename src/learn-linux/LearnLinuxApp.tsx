@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { ALL_LESSONS, ALL_MODULES, COMMAND_DOCS, COURSE_LEVELS, GLOSSARY, totalCourseXp } from "./content";
+import { ALL_LESSONS, ALL_MODULES, COMMAND_DOCS, COURSE_LEVELS, GLOSSARY } from "./content";
 import {
   ACHIEVEMENTS,
   coursePercent,
@@ -14,21 +14,27 @@ import {
   isModuleComplete,
   isModuleUnlocked,
   lessonAward,
-  loadProgress,
   nextRankForXp,
   rankForXp,
   refreshAchievements,
   sanitizeProgress,
-  saveProgress,
   THEME_STORAGE_KEY,
+  totalV2Xp,
   touchToday,
   type LearnerProgress,
 } from "./progress";
 import { createInitialState, evaluateCheck, type ExecutionResult, type SimState } from "./sim-shell";
 import { TerminalPanel } from "./TerminalPanel";
 import type { CourseLevel, CourseModule, Lesson } from "./types";
+import { loadLocalProgress, replaceLocalProgress, saveLocalProgress } from "./storage/local-progress";
+import { classifyLearningError, updateLessonPerformance } from "./v2/adaptive";
+import { LabCenter, LabSession } from "./v2/LabViews";
+import { LABS, createScenarioState, type LabScenario } from "./v2/labs";
+import { PracticeCenter, PracticeSession } from "./v2/PracticeViews";
+import { practiceId, type PracticeExercise } from "./v2/practice";
+import { ExamViewV2 } from "./v2/ExamViewV2";
 
-type MainView = "home" | "course" | "lesson" | "terminal" | "library" | "profile" | "exam";
+type MainView = "home" | "course" | "lesson" | "terminal" | "library" | "profile" | "exam" | "practice" | "practice-session" | "labs" | "lab-session";
 type Theme = "dark" | "light";
 
 interface InstallPromptEvent extends Event {
@@ -45,10 +51,14 @@ interface ToastState {
 const NAV_ITEMS: { id: MainView; label: string; icon: string }[] = [
   { id: "home", label: "Accueil", icon: "⌂" },
   { id: "course", label: "Parcours", icon: "▤" },
+  { id: "practice", label: "Révisions", icon: "↻" },
+  { id: "labs", label: "Laboratoires", icon: "◇" },
   { id: "terminal", label: "Terminal", icon: ">_" },
   { id: "library", label: "Mémo", icon: "⌕" },
   { id: "profile", label: "Profil", icon: "◎" },
 ];
+
+const MOBILE_NAV_ITEMS = NAV_ITEMS.filter((item) => ["home", "course", "practice", "labs", "terminal"].includes(item.id));
 
 function moduleForLesson(lessonId: string): CourseModule | undefined {
   return ALL_MODULES.find((item) => item.lessons.some((lesson) => lesson.id === lessonId));
@@ -89,15 +99,15 @@ function Onboarding({ onStart }: { onStart: (name: string) => void }) {
       <section className="onboarding-card">
         <div className="brand-lockup brand-large">
           <div className="brand-mark"><span>&gt;_</span></div>
-          <div><strong>CR3@TIX</strong><span>LEARN LINUX</span></div>
+          <div><strong>CR3@TIX <i className="version-badge">V2</i></strong><span>LEARN LINUX</span></div>
         </div>
         <p className="onboarding-kicker"><span /> Bienvenue dans ton laboratoire</p>
         <h1>Apprends Linux.<br /><em>Commande après commande.</em></h1>
         <p className="onboarding-copy">Aucune connaissance requise. Tu vas comprendre, pratiquer et progresser dans un terminal entièrement sécurisé.</p>
         <div className="onboarding-benefits">
-          <span><b>01</b> Parcours adaptatif</span>
-          <span><b>02</b> Terminal sans danger</span>
-          <span><b>03</b> {"5 niveaux jusqu'au pro"}</span>
+          <span><b>01</b> 162 entraînements</span>
+          <span><b>02</b> 15 missions terrain</span>
+          <span><b>03</b> SimShell 2.0 isolé</span>
         </div>
         <form
           onSubmit={(event) => {
@@ -111,7 +121,7 @@ function Onboarding({ onStart }: { onStart: (name: string) => void }) {
             <button className="button button-primary" type="submit">Entrer dans le lab <span>→</span></button>
           </div>
         </form>
-        <small>Progression enregistrée sur cet appareil · Aucun compte requis</small>
+        <small>Progression privée enregistrée sur cet appareil · Aucun compte, aucun traçage</small>
       </section>
     </div>
   );
@@ -120,13 +130,15 @@ function Onboarding({ onStart }: { onStart: (name: string) => void }) {
 function HomeView({
   progress,
   onContinue,
-  onOpenCourse,
   onOpenTerminal,
+  onOpenPractice,
+  onOpenLabs,
 }: {
   progress: LearnerProgress;
   onContinue: () => void;
-  onOpenCourse: () => void;
   onOpenTerminal: () => void;
+  onOpenPractice: () => void;
+  onOpenLabs: () => void;
 }) {
   const nextLesson = findNextLesson(progress);
   const nextModule = nextLesson ? moduleForLesson(nextLesson.id) : undefined;
@@ -153,9 +165,9 @@ function HomeView({
       </section>
 
       <section className="stat-grid" aria-label="Statistiques principales">
-        <article className="stat-card"><span className="stat-icon">⚡</span><div><strong>{progress.xp.toLocaleString("fr-FR")}</strong><span>XP total</span></div><small>sur {totalCourseXp.toLocaleString("fr-FR")}</small></article>
+        <article className="stat-card"><span className="stat-icon">⚡</span><div><strong>{progress.xp.toLocaleString("fr-FR")}</strong><span>XP total</span></div><small>sur {totalV2Xp.toLocaleString("fr-FR")}</small></article>
         <article className="stat-card"><span className="stat-icon">◫</span><div><strong>{progress.completedLessons.length}</strong><span>leçons finies</span></div><small>sur {ALL_LESSONS.length}</small></article>
-        <article className="stat-card"><span className="stat-icon">◇</span><div><strong>{progress.passedExams.length}/5</strong><span>niveaux validés</span></div><small>{rankForXp(progress.xp).short}</small></article>
+        <article className="stat-card"><span className="stat-icon">◇</span><div><strong>{progress.completedLabs.length}/{LABS.length}</strong><span>labs résolus</span></div><small>{rankForXp(progress.xp).short}</small></article>
         <article className="stat-card"><span className="stat-icon">↗</span><div><strong>{streak}</strong><span>jour{streak > 1 ? "s" : ""} de série</span></div><small>{streak ? "continue !" : "dès aujourd'hui"}</small></article>
       </section>
 
@@ -184,9 +196,11 @@ function HomeView({
           ) : (
             <div className="empty-state compact"><span>◎</span><p>Pratique quelques leçons : tes points faibles apparaîtront ici.</p></div>
           )}
-          <button className="button button-ghost button-wide" onClick={onOpenCourse}>Voir tout le parcours</button>
+          <button className="button button-primary button-wide" onClick={onOpenPractice}>Lancer ma révision →</button>
         </section>
       </div>
+
+      <section className="v2-callout panel"><div><span>V2</span><div><p className="eyebrow">MISE EN SITUATION</p><h2>15 incidents proches du monde professionnel</h2><p>Fichiers perdus, clés SSH, processus, services, réseau, conteneurs et incident final.</p></div></div><button className="button button-ghost" onClick={onOpenLabs}>Explorer les laboratoires →</button></section>
 
       <section className="safety-banner">
         <span className="safety-icon">✓</span>
@@ -246,7 +260,7 @@ function CourseView({
               </div>
               <div className={`exam-row ${complete ? "exam-ready" : ""}`}>
                 <span className="exam-mark">{passed ? "✓" : "A"}</span>
-                <div><strong>Examen du niveau {level.id}</strong><span>{passed ? "Réussi · niveau suivant débloqué" : complete ? "5 questions · score requis 80 %" : "Termine tous les modules pour le débloquer"}</span></div>
+                <div><strong>Examen du niveau {level.id}</strong><span>{passed && progress.passedPracticalExams.includes(level.id) ? "Réussi · théorie + pratique" : complete ? "5 questions · 1 mission terminal · score requis 80 %" : "Termine tous les modules pour le débloquer"}</span></div>
                 <button className={`button ${complete ? "button-primary" : "button-ghost"}`} disabled={!complete} onClick={() => onExam(level)}>{passed ? "Repasser" : "Passer l'examen"}</button>
               </div>
             </section>
@@ -397,7 +411,6 @@ function LibraryView({ progress, onToggleFavorite }: { progress: LearnerProgress
 function ProfileView({ progress, onImport, onReset }: { progress: LearnerProgress; onImport: (event: ChangeEvent<HTMLInputElement>) => void; onReset: () => void }) {
   const currentRank = rankForXp(progress.xp);
   const nextRank = nextRankForXp(progress.xp);
-  const streak = currentStreak(progress.activeDays);
   const skills = Object.entries(progress.skillMastery).sort((a, b) => b[1] - a[1]).slice(0, 10);
   const graduated = progress.achievements.includes("graduate");
 
@@ -406,20 +419,20 @@ function ProfileView({ progress, onImport, onReset }: { progress: LearnerProgres
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "creatix-linux-progression.json";
+    link.download = "creatix-linux-v2-progression.json";
     link.click();
     URL.revokeObjectURL(url);
   };
 
   return (
     <div className="view-stack">
-      <SectionHeading eyebrow="PROFIL APPRENANT" title={progress.displayName || "Learner"} description="Ta progression reste privée et sauvegardée localement sur cet appareil." />
+      <SectionHeading eyebrow="PROFIL LOCAL · SANS COMPTE" title={progress.displayName || "Learner"} description="Ta progression reste privée dans le stockage de ce navigateur. Aucun profil en ligne n'est créé." />
       <section className="profile-hero panel">
         <div className="profile-avatar">{(progress.displayName || "L").slice(0, 2).toUpperCase()}</div>
         <div className="profile-rank"><span>RANG ACTUEL</span><h2>{currentRank.name}</h2><p>{progress.xp.toLocaleString("fr-FR")} XP {nextRank ? `· encore ${nextRank.min - progress.xp} pour ${nextRank.name}` : "· rang maximal"}</p><div className="mini-progress"><i style={{ width: `${nextRank ? ((progress.xp - currentRank.min) / (nextRank.min - currentRank.min)) * 100 : 100}%` }} /></div></div>
         <div className="profile-score"><strong>{coursePercent(progress)}%</strong><span>du parcours</span></div>
       </section>
-      <section className="profile-stats stat-grid"><article className="stat-card"><span className="stat-icon">◫</span><div><strong>{progress.completedLessons.length}</strong><span>leçons</span></div></article><article className="stat-card"><span className="stat-icon">⌁</span><div><strong>{progress.commandHistory.length}</strong><span>commandes</span></div></article><article className="stat-card"><span className="stat-icon">↗</span><div><strong>{streak}</strong><span>jours de série</span></div></article><article className="stat-card"><span className="stat-icon">◷</span><div><strong>{formatDuration(progress.totalSeconds)}</strong><span>de pratique</span></div></article></section>
+      <section className="profile-stats stat-grid"><article className="stat-card"><span className="stat-icon">◫</span><div><strong>{progress.completedLessons.length}</strong><span>leçons</span></div></article><article className="stat-card"><span className="stat-icon">↻</span><div><strong>{progress.completedPractices.filter((id) => !id.endsWith(":guided")).length}</strong><span>révisions</span></div></article><article className="stat-card"><span className="stat-icon">◇</span><div><strong>{progress.completedLabs.length}</strong><span>laboratoires</span></div></article><article className="stat-card"><span className="stat-icon">◷</span><div><strong>{formatDuration(progress.totalSeconds)}</strong><span>de pratique</span></div></article></section>
 
       <div className="profile-grid">
         <section className="panel mastery-panel"><div className="panel-head"><div><p className="eyebrow">MAÎTRISE</p><h2>Compétences suivies</h2></div></div>{skills.length ? <div className="skill-list">{skills.map(([skill, value]) => <div className="skill-row" key={skill}><span>{skill}</span><div><i style={{ width: `${value}%` }} /></div><b>{Math.round(value)}%</b></div>)}</div> : <div className="empty-state compact"><p>Les données apparaîtront après tes premiers exercices.</p></div>}</section>
@@ -430,35 +443,7 @@ function ProfileView({ progress, onImport, onReset }: { progress: LearnerProgres
 
       {graduated && <section className="certificate panel"><div className="certificate-mark">CR3@TIX</div><p>CERTIFICAT DE PARCOURS</p><h2>Linux Pro</h2><span>attribué à</span><h3>{progress.displayName}</h3><p>pour avoir terminé les 5 niveaux, les laboratoires et les examens du parcours CR3@TIX Learn Linux.</p><button className="button button-primary no-print" onClick={() => window.print()}>Imprimer le certificat</button></section>}
 
-      <section className="data-panel panel"><div><p className="eyebrow">DONNÉES & HORS LIGNE</p><h2>Garder le contrôle</h2><p>Exporte une sauvegarde, puis importe-la sur un autre appareil.</p></div><div className="data-actions"><button className="button button-ghost" onClick={exportProgress}>↓ Exporter</button><label className="button button-ghost">↑ Importer<input type="file" accept="application/json" onChange={onImport} hidden /></label><button className="button button-danger" onClick={onReset}>Réinitialiser</button></div></section>
-    </div>
-  );
-}
-
-function ExamView({ level, progress, onComplete, onBack }: { level: CourseLevel; progress: LearnerProgress; onComplete: (score: number) => void; onBack: () => void }) {
-  const [answers, setAnswers] = useState<Record<number, number>>({});
-  const [result, setResult] = useState<number | null>(null);
-  const score = level.exam.filter((question, index) => answers[index] === question.answer).length;
-  const passing = Math.ceil(level.exam.length * 0.8);
-  const submit = () => {
-    setResult(score);
-    if (score >= passing) onComplete(score);
-  };
-  return (
-    <div className="exam-view view-stack">
-      <button className="back-button" onClick={onBack}>← <span>Retour au parcours</span></button>
-      <header className="exam-hero"><span>EXAMEN · NIVEAU {level.id}</span><h1>{level.title}</h1><p>Réponds à {level.exam.length} questions. Il faut au moins {passing}/{level.exam.length} pour valider le niveau.</p><div><b>+150 XP</b><i />Une seule réponse par question</div></header>
-      <form className="question-list" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-        {level.exam.map((question, questionIndex) => (
-          <fieldset className="question-card panel" key={question.question}>
-            <legend><span>{String(questionIndex + 1).padStart(2, "0")}</span>{question.question}</legend>
-            <div className="choice-list">{question.choices.map((choice, choiceIndex) => { const selected = answers[questionIndex] === choiceIndex; const reveal = result !== null; const correct = choiceIndex === question.answer; return <label className={`${selected ? "selected" : ""} ${reveal && correct ? "correct" : ""} ${reveal && selected && !correct ? "wrong" : ""}`} key={choice}><input type="radio" name={`question-${questionIndex}`} checked={selected} disabled={reveal} onChange={() => setAnswers((current) => ({ ...current, [questionIndex]: choiceIndex }))} /><span>{String.fromCharCode(65 + choiceIndex)}</span><p>{choice}</p></label>; })}</div>
-            {result !== null && <p className="answer-explanation">{question.explanation}</p>}
-          </fieldset>
-        ))}
-        {result === null ? <button className="button button-primary exam-submit" disabled={Object.keys(answers).length < level.exam.length}>Valider mes réponses</button> : <div className={`exam-result ${result >= passing ? "exam-pass" : "exam-fail"}`}><span>{result >= passing ? "✓" : "↻"}</span><div><h2>{result >= passing ? "Niveau validé !" : "Pas encore, mais tu progresses."}</h2><p>Score : {result}/{level.exam.length}. {result >= passing ? "Le niveau suivant est débloqué." : "Relis les explications puis réessaie."}</p></div><button className="button button-primary" type="button" onClick={result >= passing ? onBack : () => { setResult(null); setAnswers({}); }}>{result >= passing ? "Continuer" : "Réessayer"}</button></div>}
-      </form>
-      {progress.passedExams.includes(level.id) && <p className="already-passed">{"✓ Cet examen a déjà été validé. Le repasser n'ajoute pas de nouvel XP."}</p>}
+      <section className="data-panel panel"><div><p className="eyebrow">DONNÉES LOCALES & HORS LIGNE</p><h2>Aucun compte nécessaire</h2><p>{"Sauvegarde renforcée sur l'appareil avec migration V1 → V2. Exporte un fichier pour changer d'appareil."}</p></div><div className="data-actions"><button className="button button-ghost" onClick={exportProgress}>↓ Exporter</button><label className="button button-ghost">↑ Importer<input type="file" accept="application/json" onChange={onImport} hidden /></label><button className="button button-danger" onClick={onReset}>Réinitialiser</button></div></section>
     </div>
   );
 }
@@ -472,9 +457,20 @@ export default function LearnLinuxApp() {
   const [simState, setSimState] = useState<SimState>(() => createInitialState());
   const [simModuleId, setSimModuleId] = useState("");
   const [simResetKey, setSimResetKey] = useState(0);
+  const [activePractice, setActivePractice] = useState<PracticeExercise | null>(null);
+  const [practiceState, setPracticeState] = useState<SimState>(() => createInitialState());
+  const [practiceHints, setPracticeHints] = useState(0);
+  const [practicePassed, setPracticePassed] = useState(false);
+  const practiceStartedAt = useRef(0);
+  const [activeLab, setActiveLab] = useState<LabScenario | null>(null);
+  const [labState, setLabState] = useState<SimState>(() => createInitialState());
+  const [labHints, setLabHints] = useState(0);
+  const [labAttempts, setLabAttempts] = useState(0);
+  const [labPassed, setLabPassed] = useState(false);
   const [theme, setTheme] = useState<Theme>("dark");
   const [online, setOnline] = useState(true);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+  const [updateRegistration, setUpdateRegistration] = useState<ServiceWorkerRegistration | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -486,15 +482,21 @@ export default function LearnLinuxApp() {
   /* La restauration locale doit s'effectuer après l'hydratation du rendu statique. */
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    const loaded = refreshAchievements(touchToday(loadProgress()));
-    setProgress(loaded);
-    setActiveLessonId(loaded.currentLessonId || ALL_LESSONS[0]?.id || "");
+    let cancelled = false;
+    void loadLocalProgress().then((stored) => {
+      if (cancelled) return;
+      const loaded = refreshAchievements(touchToday(stored));
+      setProgress(loaded);
+      setActiveLessonId(loaded.currentLessonId || ALL_LESSONS[0]?.id || "");
+      setHydrated(true);
+    });
     const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY) as Theme | null;
     const resolved = storedTheme ?? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
     setTheme(resolved);
     document.documentElement.dataset.theme = resolved;
     setOnline(navigator.onLine);
-    setHydrated(true);
+    const requestedView = new URLSearchParams(window.location.search).get("view");
+    if (requestedView === "terminal" || requestedView === "practice") setView(requestedView);
 
     const onOnline = () => setOnline(true);
     const onOffline = () => setOnline(false);
@@ -502,21 +504,40 @@ export default function LearnLinuxApp() {
       event.preventDefault();
       setInstallPrompt(event as InstallPromptEvent);
     };
+    let refreshing = false;
+    const onControllerChange = () => {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    };
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
     window.addEventListener("beforeinstallprompt", onBeforeInstall);
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => undefined);
+    navigator.serviceWorker?.addEventListener("controllerchange", onControllerChange);
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js").then((registration) => {
+        if (registration.waiting) setUpdateRegistration(registration);
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          worker?.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) setUpdateRegistration(registration);
+          });
+        });
+      }).catch(() => undefined);
+    }
     return () => {
+      cancelled = true;
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("beforeinstallprompt", onBeforeInstall);
+      navigator.serviceWorker?.removeEventListener("controllerchange", onControllerChange);
     };
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     if (!hydrated) return;
-    saveProgress(progress);
+    void saveLocalProgress(progress);
   }, [hydrated, progress]);
 
   useEffect(() => {
@@ -562,6 +583,26 @@ export default function LearnLinuxApp() {
     else setView("course");
   };
 
+  const openPractice = (exercise: PracticeExercise) => {
+    setActivePractice(exercise);
+    setPracticeState(createInitialState());
+    setPracticeHints(0);
+    setPracticePassed(false);
+    practiceStartedAt.current = Date.now();
+    setView("practice-session");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const openLab = (scenario: LabScenario) => {
+    setActiveLab(scenario);
+    setLabState(createScenarioState(scenario.setupCommands));
+    setLabHints(0);
+    setLabAttempts(0);
+    setLabPassed(false);
+    setView("lab-session");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   const recordCommand = (command: string, result: ExecutionResult, evaluateLesson: boolean) => {
     updateProgress((current) => {
       const historyItem = {
@@ -581,11 +622,19 @@ export default function LearnLinuxApp() {
         const value = mastery[skill] ?? 30;
         mastery[skill] = Math.max(5, Math.min(100, value + (passed ? 18 : result.exitCode === 0 ? 1 : -3)));
       }
-      next = { ...next, attemptsByLesson: { ...current.attemptsByLesson, [lessonId]: attempts }, skillMastery: mastery };
+      const error = classifyLearningError(result, passed);
+      const performance = updateLessonPerformance(current.performanceByLesson[lessonId], {
+        passed,
+        hintsUsed: passed ? (current.hintsByLesson[lessonId] ?? 0) : 0,
+        elapsedSeconds: 60,
+        error,
+      });
+      next = { ...next, attemptsByLesson: { ...current.attemptsByLesson, [lessonId]: attempts }, skillMastery: mastery, performanceByLesson: { ...current.performanceByLesson, [lessonId]: performance } };
       if (passed && !current.completedLessons.includes(lessonId)) {
         const award = lessonAward(activeLesson.exercise.xp, current.hintsByLesson[lessonId] ?? 0);
         const completedLessons = [...current.completedLessons, lessonId];
-        const provisional = { ...next, completedLessons, xp: current.xp + award };
+        const completedPractices = [...new Set([...current.completedPractices, practiceId(lessonId, "guided")])];
+        const provisional = { ...next, completedLessons, completedPractices, xp: current.xp + award };
         const following = findNextLesson(provisional);
         next = { ...provisional, currentLessonId: following?.id ?? lessonId };
         queueMicrotask(() => showToast({ title: `+${award} XP · Leçon terminée`, detail: activeLesson.exercise.success, tone: "success" }));
@@ -596,11 +645,69 @@ export default function LearnLinuxApp() {
     });
   };
 
+  const recordPracticeCommand = (command: string, result: ExecutionResult) => {
+    if (!activePractice || practicePassed) return;
+    const passed = activePractice.checks.every((check) => evaluateCheck(result.state, check));
+    const elapsedSeconds = Math.max(1, Math.round((Date.now() - practiceStartedAt.current) / 1000));
+    practiceStartedAt.current = Date.now();
+    if (passed) setPracticePassed(true);
+    updateProgress((current) => {
+      const lesson = getLesson(activePractice.lessonId);
+      const courseModule = lesson ? moduleForLesson(lesson.id) : undefined;
+      const historyItem = { command, output: `${result.stdout}${result.stderr}`.slice(0, 3000), exitCode: result.exitCode, at: new Date().toISOString() };
+      const alreadyComplete = current.completedPractices.includes(activePractice.id);
+      const performance = updateLessonPerformance(current.performanceByLesson[activePractice.lessonId], {
+        passed,
+        hintsUsed: passed ? practiceHints : 0,
+        elapsedSeconds,
+        error: classifyLearningError(result, passed),
+      });
+      const mastery = { ...current.skillMastery };
+      for (const skill of courseModule?.skills ?? []) {
+        mastery[skill] = Math.max(5, Math.min(100, (mastery[skill] ?? 35) + (passed ? activePractice.mode === "autonomous" ? 14 : 9 : result.exitCode === 0 ? 1 : -2)));
+      }
+      const completedPractices = passed && !alreadyComplete ? [...current.completedPractices, activePractice.id] : current.completedPractices;
+      const next = {
+        ...current,
+        commandHistory: [...current.commandHistory, historyItem].slice(-250),
+        performanceByLesson: { ...current.performanceByLesson, [activePractice.lessonId]: performance },
+        skillMastery: mastery,
+        completedPractices,
+        xp: current.xp + (passed && !alreadyComplete ? activePractice.xp : 0),
+      };
+      if (passed) queueMicrotask(() => showToast({ title: alreadyComplete ? "Révision réussie" : `+${activePractice.xp} XP · Compétence renforcée`, detail: activePractice.success, tone: "success" }));
+      else if (result.exitCode !== 0) queueMicrotask(() => showToast({ title: "Erreur analysée", detail: "Le coach local utilisera cette difficulté pour ta prochaine séance.", tone: "info" }));
+      return next;
+    });
+  };
+
+  const recordLabCommand = (command: string, result: ExecutionResult) => {
+    if (!activeLab || labPassed) return;
+    const nextAttempts = labAttempts + 1;
+    setLabAttempts(nextAttempts);
+    const passed = activeLab.checks.every((check) => evaluateCheck(result.state, check));
+    const score = Math.max(40, 100 - labHints * 12 - Math.max(0, nextAttempts - 1) * 4);
+    if (passed) setLabPassed(true);
+    updateProgress((current) => {
+      const historyItem = { command, output: `${result.stdout}${result.stderr}`.slice(0, 3000), exitCode: result.exitCode, at: new Date().toISOString() };
+      const alreadyComplete = current.completedLabs.includes(activeLab.id);
+      const completedLabs = passed && !alreadyComplete ? [...current.completedLabs, activeLab.id] : current.completedLabs;
+      const labScores = passed ? { ...current.labScores, [activeLab.id]: Math.max(current.labScores[activeLab.id] ?? 0, score) } : current.labScores;
+      if (passed) queueMicrotask(() => showToast({ title: alreadyComplete ? `Mission résolue · ${score}%` : `+${activeLab.xp} XP · Mission résolue`, detail: activeLab.debrief, tone: "success" }));
+      return { ...current, commandHistory: [...current.commandHistory, historyItem].slice(-250), completedLabs, labScores, xp: current.xp + (passed && !alreadyComplete ? activeLab.xp : 0) };
+    });
+  };
+
   const completeExam = (score: number) => {
+    if (score < Math.ceil(activeExam.exam.length * 0.8)) return;
     const alreadyPassed = progress.passedExams.includes(activeExam.id);
-    if (score < Math.ceil(activeExam.exam.length * 0.8) || alreadyPassed) return;
-    updateProgress((current) => ({ ...current, passedExams: [...current.passedExams, activeExam.id], xp: current.xp + 150 }));
-    showToast({ title: "+150 XP · Niveau validé", detail: `${activeExam.rank} débloqué.`, tone: "success" });
+    updateProgress((current) => ({
+      ...current,
+      passedExams: current.passedExams.includes(activeExam.id) ? current.passedExams : [...current.passedExams, activeExam.id],
+      passedPracticalExams: current.passedPracticalExams.includes(activeExam.id) ? current.passedPracticalExams : [...current.passedPracticalExams, activeExam.id],
+      xp: current.xp + (current.passedExams.includes(activeExam.id) ? 0 : 150),
+    }));
+    showToast({ title: alreadyPassed ? "Cas pratique validé" : "+150 XP · Niveau validé", detail: `${activeExam.rank} débloqué.`, tone: "success" });
   };
 
   const switchTheme = () => {
@@ -616,6 +723,7 @@ export default function LearnLinuxApp() {
     try {
       const imported = sanitizeProgress(JSON.parse(await file.text()));
       setProgress(refreshAchievements(touchToday(imported)));
+      await replaceLocalProgress(imported);
       setActiveLessonId(imported.currentLessonId);
       showToast({ title: "Progression importée", detail: "Ta sauvegarde est prête sur cet appareil.", tone: "success" });
     } catch {
@@ -631,20 +739,25 @@ export default function LearnLinuxApp() {
     setActiveLessonId(fresh.currentLessonId);
     setSimState(createInitialState());
     setView("home");
+    void replaceLocalProgress(fresh);
   };
 
-  const navView = view === "lesson" || view === "exam" ? "course" : view;
+  const navView = view === "lesson" || view === "exam" ? "course" : view === "practice-session" ? "practice" : view === "lab-session" ? "labs" : view;
   const page = useMemo(() => {
-    if (view === "home") return <HomeView progress={progress} onContinue={() => { const next = findNextLesson(progress); if (next) openLesson(next); }} onOpenCourse={() => setView("course")} onOpenTerminal={() => setView("terminal")} />;
+    if (view === "home") return <HomeView progress={progress} onContinue={() => { const next = findNextLesson(progress); if (next) openLesson(next); }} onOpenTerminal={() => setView("terminal")} onOpenPractice={() => setView("practice")} onOpenLabs={() => setView("labs")} />;
     if (view === "course") return <CourseView progress={progress} onLesson={openLesson} onExam={(level) => { setActiveExamLevel(level.id); setView("exam"); window.scrollTo(0, 0); }} />;
     if (view === "lesson" && activeLesson && activeModule) return <LessonView key={`${activeLesson.id}-${simResetKey}`} lesson={activeLesson} courseModule={activeModule} progress={progress} simState={simState} onSimState={setSimState} onExecute={(command, result) => recordCommand(command, result, true)} onHint={() => updateProgress((current) => ({ ...current, hintsByLesson: { ...current.hintsByLesson, [activeLesson.id]: Math.min(3, (current.hintsByLesson[activeLesson.id] ?? 0) + 1) } }))} onBack={() => setView("course")} onNext={openNextLesson} />;
     if (view === "terminal") return <FreeTerminalView key={simResetKey} state={simState} onState={setSimState} onExecute={(command, result) => recordCommand(command, result, false)} onReset={() => { setSimState(createInitialState()); setSimResetKey((value) => value + 1); setSimModuleId(""); showToast({ title: "Laboratoire réinitialisé", detail: "Le système virtuel est revenu à son état initial.", tone: "success" }); }} />;
     if (view === "library") return <LibraryView progress={progress} onToggleFavorite={(name) => updateProgress((current) => ({ ...current, favoriteCommands: current.favoriteCommands.includes(name) ? current.favoriteCommands.filter((item) => item !== name) : [...current.favoriteCommands, name] }))} />;
     if (view === "profile") return <ProfileView progress={progress} onImport={importProgress} onReset={resetProgress} />;
-    if (view === "exam") return <ExamView level={activeExam} progress={progress} onComplete={completeExam} onBack={() => setView("course")} />;
+    if (view === "practice") return <PracticeCenter progress={progress} onStart={openPractice} onCourse={() => setView("course")} />;
+    if (view === "practice-session" && activePractice) return <PracticeSession exercise={activePractice} state={practiceState} hintsUsed={practiceHints} passed={practicePassed} onState={setPracticeState} onExecute={recordPracticeCommand} onHint={() => setPracticeHints((value) => Math.min(activePractice.hints.length, value + 1))} onBack={() => setView("practice")} onReset={() => { setPracticeState(createInitialState()); setPracticeHints(0); setPracticePassed(false); practiceStartedAt.current = Date.now(); }} />;
+    if (view === "labs") return <LabCenter progress={progress} onStart={openLab} />;
+    if (view === "lab-session" && activeLab) return <LabSession scenario={activeLab} state={labState} hintsUsed={labHints} attempts={labAttempts} passed={labPassed} onState={setLabState} onExecute={recordLabCommand} onHint={() => setLabHints((value) => Math.min(3, value + 1))} onBack={() => setView("labs")} onReset={() => { setLabState(createScenarioState(activeLab.setupCommands)); setLabHints(0); setLabAttempts(0); setLabPassed(false); }} />;
+    if (view === "exam") return <ExamViewV2 key={`exam-${activeExam.id}`} level={activeExam} progress={progress} onComplete={completeExam} onBack={() => setView("course")} />;
     return null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, progress, activeLessonId, activeExamLevel, simState, simResetKey]);
+  }, [view, progress, activeLessonId, activeExamLevel, simState, simResetKey, activePractice, practiceState, practiceHints, practicePassed, activeLab, labState, labHints, labAttempts, labPassed]);
 
   if (!hydrated) return <div className="app-loading"><div className="brand-mark"><span>&gt;_</span></div><p>Initialisation du laboratoire…</p></div>;
   if (!progress.onboardingComplete) return <Onboarding onStart={(displayName) => setProgress(refreshAchievements(touchToday({ ...defaultProgress(), displayName, onboardingComplete: true })))} />;
@@ -652,7 +765,7 @@ export default function LearnLinuxApp() {
   return (
     <div className="app-shell">
       <aside className="side-nav">
-        <button className="brand-lockup" onClick={() => setView("home")} aria-label="Accueil CR3@TIX Learn Linux"><div className="brand-mark"><span>&gt;_</span></div><div><strong>CR3@TIX</strong><span>LEARN LINUX</span></div></button>
+        <button className="brand-lockup" onClick={() => setView("home")} aria-label="Accueil CR3@TIX Learn Linux"><div className="brand-mark"><span>&gt;_</span></div><div><strong>CR3@TIX <i className="version-badge">V2</i></strong><span>LEARN LINUX</span></div></button>
         <nav aria-label="Navigation principale">{NAV_ITEMS.map((item) => <button key={item.id} className={navView === item.id ? "active" : ""} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span><span>{item.label}</span>{item.id === "course" && <small>{coursePercent(progress)}%</small>}</button>)}</nav>
         <div className="side-progress"><div><span>PROGRESSION</span><b>{coursePercent(progress)}%</b></div><div className="mini-progress"><i style={{ width: `${coursePercent(progress)}%` }} /></div><p>{progress.completedLessons.length}/{ALL_LESSONS.length} leçons</p></div>
         <button className="side-profile" onClick={() => setView("profile")}><span>{(progress.displayName || "L").slice(0, 2).toUpperCase()}</span><div><strong>{progress.displayName}</strong><small>{rank.name}</small></div><i>›</i></button>
@@ -663,15 +776,18 @@ export default function LearnLinuxApp() {
           <button className="mobile-brand" onClick={() => setView("home")}><span>&gt;_</span><strong>CR3@TIX</strong></button>
           <div className={`connection-state ${online ? "online" : "offline"}`}><i />{online ? "EN LIGNE" : "HORS LIGNE"}</div>
           <div className="topbar-actions">
+            {updateRegistration && <button className="install-button update-button" onClick={() => updateRegistration.waiting?.postMessage({ type: "SKIP_WAITING" })}>↻ Mettre à jour</button>}
             {installPrompt && <button className="install-button" onClick={async () => { await installPrompt.prompt(); await installPrompt.userChoice; setInstallPrompt(null); }}>＋ Installer</button>}
             <span className="xp-total">⚡ {progress.xp.toLocaleString("fr-FR")} XP</span>
+            <button className="theme-button mobile-only-action" onClick={() => setView("library")} aria-label="Ouvrir le mémo">⌕</button>
+            <button className="profile-shortcut" onClick={() => setView("profile")} aria-label="Ouvrir le profil">{(progress.displayName || "L").slice(0, 2).toUpperCase()}</button>
             <button className="theme-button" onClick={switchTheme} aria-label={theme === "dark" ? "Activer le thème clair" : "Activer le thème sombre"}>{theme === "dark" ? "☼" : "◐"}</button>
           </div>
         </header>
         <main className="main-content">{page}</main>
       </div>
 
-      <nav className="bottom-nav" aria-label="Navigation mobile">{NAV_ITEMS.map((item) => <button key={item.id} className={navView === item.id ? "active" : ""} onClick={() => setView(item.id)}><span>{item.icon}</span><small>{item.label}</small></button>)}</nav>
+      <nav className="bottom-nav" aria-label="Navigation mobile">{MOBILE_NAV_ITEMS.map((item) => <button key={item.id} className={navView === item.id ? "active" : ""} onClick={() => setView(item.id)}><span>{item.icon}</span><small>{item.label}</small></button>)}</nav>
       {toast && <div className={`app-toast ${toast.tone ?? "info"}`} role="status"><span>{toast.tone === "success" ? "✓" : "i"}</span><div><strong>{toast.title}</strong><p>{toast.detail}</p></div><button onClick={() => setToast(null)} aria-label="Fermer">×</button></div>}
     </div>
   );

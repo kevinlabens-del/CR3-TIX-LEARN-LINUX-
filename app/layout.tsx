@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import Script from "next/script";
 import "./globals.css";
 
 const publicUrl = "https://kevinlabens-del.github.io/CR3-TIX-LEARN-LINUX-/";
@@ -39,5 +40,17 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="fr" suppressHydrationWarning><body>{children}</body></html>;
+  return (
+    <html lang="fr" suppressHydrationWarning>
+      <body>
+        {children}
+        <Script
+          src="https://kevinlabens-del.github.io/CR3-TIX-ANALYTIX./analytics.js"
+          data-project-id="80eec10c-7b77-49ec-acf4-a6aa2ad8e779"
+          data-project-key="a1b81feb-93ae-4616-b4dd-99c905c7b52d"
+          strategy="afterInteractive"
+        />
+      </body>
+    </html>
+  );
 }

@@ -558,6 +558,37 @@ export default function LearnLinuxApp() {
     toastTimer.current = setTimeout(() => setToast(null), 4200);
   };
 
+  /* CR3ATIX_SHARE_V1 — ne transmet aucune progression ni donnée locale. */
+  const shareApplication = async () => {
+    const url = "https://kevinlabens-del.github.io/CR3-TIX-LEARN-LINUX-/";
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "CR3@TIX Learn Linux V2",
+          text: "Découvre CR3@TIX Learn Linux : apprends Linux commande après commande avec parcours, terminal et laboratoires.",
+          url,
+        });
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    }
+    try {
+      if (window.isSecureContext && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        showToast({ title: "Lien copié", detail: "Le lien public de Learn Linux est prêt à être partagé.", tone: "success" });
+        return;
+      }
+    } catch {}
+    const field = document.createElement("textarea");
+    field.value = url; field.readOnly = true; field.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+    document.body.appendChild(field); field.select(); field.setSelectionRange(0, field.value.length);
+    let copied = false; try { copied = document.execCommand("copy"); } catch {}
+    field.remove();
+    if (copied) showToast({ title: "Lien copié", detail: "Le lien public de Learn Linux est prêt à être partagé.", tone: "success" });
+    else window.prompt("Copie ce lien pour partager CR3@TIX Learn Linux :", url);
+  };
+
   const updateProgress = (updater: (current: LearnerProgress) => LearnerProgress) => {
     setProgress((current) => refreshAchievements(touchToday(updater(current))));
   };
@@ -778,6 +809,7 @@ export default function LearnLinuxApp() {
           <div className="topbar-actions">
             {updateRegistration && <button className="install-button update-button" onClick={() => updateRegistration.waiting?.postMessage({ type: "SKIP_WAITING" })}>↻ Mettre à jour</button>}
             {installPrompt && <button className="install-button" onClick={async () => { await installPrompt.prompt(); await installPrompt.userChoice; setInstallPrompt(null); }}>＋ Installer</button>}
+            <button className="install-button" type="button" onClick={() => void shareApplication()} aria-label="Partager CR3@TIX Learn Linux" title="Partager l’application">↗ Partager</button>
             <span className="xp-total">⚡ {progress.xp.toLocaleString("fr-FR")} XP</span>
             <button className="theme-button mobile-only-action" onClick={() => setView("library")} aria-label="Ouvrir le mémo">⌕</button>
             <button className="profile-shortcut" onClick={() => setView("profile")} aria-label="Ouvrir le profil">{(progress.displayName || "L").slice(0, 2).toUpperCase()}</button>
